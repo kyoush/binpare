@@ -7,5 +7,6 @@ fn main() {
         "binpare",
         options,
         Box::new(|cc| Ok(Box::new(BinpareApp::new(cc)))),
-    ).expect("failed to start eframe");
+    )
+    .expect("failed to start eframe");
 }

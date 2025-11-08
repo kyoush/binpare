@@ -1,11 +1,11 @@
 use eframe::egui;
 use egui::{Color32, RichText};
-use std::thread;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB for demo
 const DEFAULT_BYTES_PER_ROW: usize = 16;
@@ -76,15 +76,24 @@ impl BinpareApp {
         let (size, truncated) = match std::fs::metadata(&path) {
             Ok(m) => {
                 let s = m.len();
-                if s > MAX_READ_BYTES { (s, true) } else { (s, false) }
+                if s > MAX_READ_BYTES {
+                    (s, true)
+                } else {
+                    (s, false)
+                }
             }
             Err(_) => (0, false),
         };
 
-        LoadedFile { path, data: data_arc, size, truncated, ready }
+        LoadedFile {
+            path,
+            data: data_arc,
+            size,
+            truncated,
+            ready,
+        }
     }
 }
-
 
 impl eframe::App for BinpareApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -100,7 +109,13 @@ impl eframe::App for BinpareApp {
                     if ui.button("Prev diff").clicked() {
                         if !self.diff_row_indices.is_empty() {
                             let next = match self.current_diff_idx {
-                                Some(idx) => if idx == 0 { self.diff_row_indices.len() - 1 } else { idx - 1 },
+                                Some(idx) => {
+                                    if idx == 0 {
+                                        self.diff_row_indices.len() - 1
+                                    } else {
+                                        idx - 1
+                                    }
+                                }
                                 None => 0,
                             };
                             self.current_diff_idx = Some(next);
@@ -143,7 +158,14 @@ impl eframe::App for BinpareApp {
                     }
                 }
 
-                if ui.button(if self.split_mode { "Single view" } else { "Split view" }).clicked() {
+                if ui
+                    .button(if self.split_mode {
+                        "Single view"
+                    } else {
+                        "Split view"
+                    })
+                    .clicked()
+                {
                     self.split_mode = !self.split_mode;
                 }
             });
@@ -172,7 +194,9 @@ impl eframe::App for BinpareApp {
                     self.dialog_rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.dialog_rx = None; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.dialog_rx = None;
+                }
             }
         }
 
@@ -213,9 +237,14 @@ impl eframe::App for BinpareApp {
                     let end = start + bytes_per_row;
                     let mut any = false;
                     for i in start..end {
-                        if i < diffv.len() && diffv[i] { any = true; break; }
+                        if i < diffv.len() && diffv[i] {
+                            any = true;
+                            break;
+                        }
                     }
-                    if any { row_indices.push(row); }
+                    if any {
+                        row_indices.push(row);
+                    }
                 }
                 self.diff = Some(diffv);
                 self.diff_row_indices = row_indices;
@@ -241,23 +270,41 @@ impl eframe::App for BinpareApp {
                             let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
                             if !ready {
-                                ui.centered_and_justified(|ui| { ui.label("Loading file A..."); });
+                                ui.centered_and_justified(|ui| {
+                                    ui.label("Loading file A...");
+                                });
                             } else {
                                 ui.push_id("pane_a", |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("{:08x}:", 0)).monospace());
                                         ui.add_space(6.0);
-                                        let mut hex_header = String::with_capacity(self.bytes_per_row * 3);
-                                        for i in 0..self.bytes_per_row { hex_header.push_str(&format!("{:02x} ", i)); }
-                                        ui.add(egui::Label::new(RichText::new(hex_header).monospace().strong()));
+                                        let mut hex_header =
+                                            String::with_capacity(self.bytes_per_row * 3);
+                                        for i in 0..self.bytes_per_row {
+                                            hex_header.push_str(&format!("{:02x} ", i));
+                                        }
+                                        ui.add(egui::Label::new(
+                                            RichText::new(hex_header).monospace().strong(),
+                                        ));
                                         ui.separator();
                                         ui.label(RichText::new("ASCII").monospace().strong());
                                     });
-                                    let selected_row = self.current_diff_idx.and_then(|i| self.diff_row_indices.get(i).copied());
-                                    hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref(), self.diff_highlight, selected_row);
+                                    let selected_row = self
+                                        .current_diff_idx
+                                        .and_then(|i| self.diff_row_indices.get(i).copied());
+                                    hexdump_ui(
+                                        ui,
+                                        &data,
+                                        self.bytes_per_row,
+                                        self.diff.as_ref(),
+                                        self.diff_highlight,
+                                        selected_row,
+                                    );
                                 });
                             }
-                        } else { ui.label("(no file)"); }
+                        } else {
+                            ui.label("(no file)");
+                        }
                     });
 
                     cols[1].vertical(|ui| {
@@ -265,23 +312,41 @@ impl eframe::App for BinpareApp {
                             let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
                             if !ready {
-                                ui.centered_and_justified(|ui| { ui.label("Loading file B..."); });
+                                ui.centered_and_justified(|ui| {
+                                    ui.label("Loading file B...");
+                                });
                             } else {
                                 ui.push_id("pane_b", |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("{:08x}:", 0)).monospace());
                                         ui.add_space(6.0);
-                                        let mut hex_header = String::with_capacity(self.bytes_per_row * 3);
-                                        for i in 0..self.bytes_per_row { hex_header.push_str(&format!("{:02x} ", i)); }
-                                        ui.add(egui::Label::new(RichText::new(hex_header).monospace().strong()));
+                                        let mut hex_header =
+                                            String::with_capacity(self.bytes_per_row * 3);
+                                        for i in 0..self.bytes_per_row {
+                                            hex_header.push_str(&format!("{:02x} ", i));
+                                        }
+                                        ui.add(egui::Label::new(
+                                            RichText::new(hex_header).monospace().strong(),
+                                        ));
                                         ui.separator();
                                         ui.label(RichText::new("ASCII").monospace().strong());
                                     });
-                                    let selected_row = self.current_diff_idx.and_then(|i| self.diff_row_indices.get(i).copied());
-                                    hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref(), self.diff_highlight, selected_row);
+                                    let selected_row = self
+                                        .current_diff_idx
+                                        .and_then(|i| self.diff_row_indices.get(i).copied());
+                                    hexdump_ui(
+                                        ui,
+                                        &data,
+                                        self.bytes_per_row,
+                                        self.diff.as_ref(),
+                                        self.diff_highlight,
+                                        selected_row,
+                                    );
                                 });
                             }
-                        } else { ui.label("(no file)"); }
+                        } else {
+                            ui.label("(no file)");
+                        }
                     });
                 });
             } else {
@@ -300,8 +365,12 @@ fn render_pane_single(ui: &mut egui::Ui, file: &Option<LoadedFile>, bytes_per_ro
                     ui.label(RichText::new(format!("{:08x}:", 0)).monospace());
                     ui.add_space(6.0);
                     let mut hex_header = String::with_capacity(bytes_per_row * 3);
-                    for i in 0..bytes_per_row { hex_header.push_str(&format!("{:02x} ", i)); }
-                    ui.add(egui::Label::new(RichText::new(hex_header).monospace().strong()));
+                    for i in 0..bytes_per_row {
+                        hex_header.push_str(&format!("{:02x} ", i));
+                    }
+                    ui.add(egui::Label::new(
+                        RichText::new(hex_header).monospace().strong(),
+                    ));
                     ui.separator();
                     ui.label(RichText::new("ASCII").monospace().strong());
                 });
@@ -314,7 +383,12 @@ fn render_pane_single(ui: &mut egui::Ui, file: &Option<LoadedFile>, bytes_per_ro
 }
 
 #[allow(dead_code)]
-fn render_pane(mut col: egui::Ui, file: &Option<LoadedFile>, other: &Option<LoadedFile>, bytes_per_row: usize) {
+fn render_pane(
+    mut col: egui::Ui,
+    file: &Option<LoadedFile>,
+    other: &Option<LoadedFile>,
+    bytes_per_row: usize,
+) {
     col.group(|ui| {
         if let Some(loaded) = file {
             let data = loaded.data.lock().unwrap();
@@ -326,16 +400,29 @@ fn render_pane(mut col: egui::Ui, file: &Option<LoadedFile>, other: &Option<Load
                 for i in 0..max {
                     let a = data.get(i).copied();
                     let b = d.get(i).copied();
-                    if a != b { diffvec[i] = true; }
+                    if a != b {
+                        diffvec[i] = true;
+                    }
                 }
                 Some(diffvec)
-            } else { None };
+            } else {
+                None
+            };
             hexdump_ui(ui, &data, bytes_per_row, diff.as_ref(), false, None);
-        } else { ui.label("(no file)"); }
+        } else {
+            ui.label("(no file)");
+        }
     });
 }
 
-fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Option<&Vec<bool>>, diff_highlight: bool, selected_row: Option<usize>) {
+fn hexdump_ui(
+    ui: &mut egui::Ui,
+    data: &[u8],
+    bytes_per_row: usize,
+    diff_opt: Option<&Vec<bool>>,
+    diff_highlight: bool,
+    selected_row: Option<usize>,
+) {
     let rows = (data.len() + bytes_per_row - 1) / bytes_per_row;
     let row_height = 20.0;
     // Precompute global matching ranges (byte index, length) when diff highlighting is enabled.
@@ -349,15 +436,26 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
             for i in 0..diffv.len() {
                 let is_match = !diffv[i];
                 if is_match {
-                    if cur_start.is_none() { cur_start = Some(i); }
+                    if cur_start.is_none() {
+                        cur_start = Some(i);
+                    }
                 } else {
-                    if let Some(s) = cur_start { ranges.push((s, i - s)); cur_start = None; }
+                    if let Some(s) = cur_start {
+                        ranges.push((s, i - s));
+                        cur_start = None;
+                    }
                 }
             }
-            if let Some(s) = cur_start { ranges.push((s, diffv.len() - s)); }
+            if let Some(s) = cur_start {
+                ranges.push((s, diffv.len() - s));
+            }
             ranges
-        } else { Vec::new() }
-    } else { Vec::new() };
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
     egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, row_range| {
         for row in row_range {
             let offset = row * bytes_per_row;
@@ -373,12 +471,16 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
                     hex_line.push(HEX_CHARS[(b >> 4) as usize] as char);
                     hex_line.push(HEX_CHARS[(b & 0xF) as usize] as char);
                     hex_line.push(' ');
-                    if b.is_ascii_graphic() || b == b' ' { ascii.push(b as char); } else { ascii.push('.'); }
+                    if b.is_ascii_graphic() || b == b' ' {
+                        ascii.push(b as char);
+                    } else {
+                        ascii.push('.');
+                    }
 
                     if let Some(diffv) = diff_opt {
-                                if idx < diffv.len() && diffv[idx] {
-                                    _row_has_diff = true;
-                                }
+                        if idx < diffv.len() && diffv[idx] {
+                            _row_has_diff = true;
+                        }
                     }
                 } else {
                     hex_line.push_str("   ");
@@ -410,7 +512,13 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
             let text_color = ui.visuals().text_color();
             let font_id = egui::FontId::monospace(13.0);
             let pos = rect.min + egui::vec2(4.0, 2.0);
-            painter.text(pos, egui::Align2::LEFT_TOP, combined, font_id.clone(), text_color);
+            painter.text(
+                pos,
+                egui::Align2::LEFT_TOP,
+                combined,
+                font_id.clone(),
+                text_color,
+            );
 
             // For multi-row matching ranges computed above, draw only the intersection of
             // each range with this row. This produces continuous-looking rectangles that
@@ -420,7 +528,8 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
                 let hex_byte_w = char_width * 3.0;
                 let addr_chars = 11.0;
                 let hex_start_x = pos.x + addr_chars * char_width + 2.0;
-                let stroke = egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(120, 220, 120, 200));
+                let stroke =
+                    egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(120, 220, 120, 200));
                 for &(range_start, range_len) in &matching_ranges {
                     let range_end = range_start + range_len;
                     let row_start = offset;
@@ -432,9 +541,14 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
                         let len_col = e - s;
                         let x0 = hex_start_x + (start_col as f32) * hex_byte_w;
                         let width = (len_col as f32) * hex_byte_w - 4.0;
-                        if width <= 0.0 { continue; }
+                        if width <= 0.0 {
+                            continue;
+                        }
                         let y0 = rect.min.y + 2.0;
-                        let hex_rect = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(width, row_height - 4.0));
+                        let hex_rect = egui::Rect::from_min_size(
+                            egui::pos2(x0, y0),
+                            egui::vec2(width, row_height - 4.0),
+                        );
                         let r = hex_rect.shrink(1.5);
                         let p1 = r.left_top();
                         let p2 = r.right_top();
