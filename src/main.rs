@@ -33,7 +33,9 @@ struct BinpareApp {
     split_mode: bool,
     bytes_per_row: usize,
     loading: bool,
-    dialog_rx: Option<Receiver<Option<PathBuf>>>,
+    dialog_rx: Option<Receiver<(usize, Option<PathBuf>)>>,
+    // cached diff vector for current file_a vs file_b (computed once when both ready)
+    diff: Option<Vec<bool>>,
 }
 
 impl BinpareApp {
@@ -73,6 +75,7 @@ impl BinpareApp {
             bytes_per_row: DEFAULT_BYTES_PER_ROW,
             loading: false,
             dialog_rx: None,
+            diff: None,
         }
     }
 
@@ -121,21 +124,45 @@ impl eframe::App for BinpareApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("binpare");
-                if ui.button("Open").clicked() {
-                    // spawn native file dialog in background thread to avoid blocking UI thread
-                    if self.dialog_rx.is_none() {
-                        let (tx, rx) = channel();
-                        self.dialog_rx = Some(rx);
-                        thread::spawn(move || {
-                            let res = rfd::FileDialog::new().pick_file();
-                            let _ = tx.send(res);
-                        });
+                ui.push_id("open_a", |ui| {
+                    if ui.button("Open A").clicked() {
+                        // spawn native file dialog in background thread to avoid blocking UI thread
+                        if self.dialog_rx.is_none() {
+                            let (tx, rx) = channel();
+                            self.dialog_rx = Some(rx);
+                            thread::spawn(move || {
+                                let res = rfd::FileDialog::new().pick_file();
+                                let _ = tx.send((0, res));
+                            });
+                        }
                     }
+                });
+
+                if self.split_mode {
+                    ui.push_id("open_b", |ui| {
+                        if ui.button("Open B").clicked() {
+                            // open for file B
+                            if self.dialog_rx.is_none() {
+                                let (tx, rx) = channel();
+                                self.dialog_rx = Some(rx);
+                                thread::spawn(move || {
+                                    let res = rfd::FileDialog::new().pick_file();
+                                    let _ = tx.send((1, res));
+                                });
+                            }
+                        }
+                    });
                 }
-                if ui.button(if self.split_mode { "Single view" } else { "Split view" }).clicked() {
-                    self.split_mode = !self.split_mode;
-                }
-                ui.add(egui::Slider::new(&mut self.bytes_per_row, 8..=32).text("bytes/row"));
+
+                ui.push_id("toggle_split", |ui| {
+                    if ui.button(if self.split_mode { "Single view" } else { "Split view" }).clicked() {
+                        self.split_mode = !self.split_mode;
+                    }
+                });
+
+                ui.push_id("bytes_per_row", |ui| {
+                    ui.add(egui::Slider::new(&mut self.bytes_per_row, 8..=32).text("bytes/row"));
+                });
             });
         });
 
@@ -156,9 +183,9 @@ impl eframe::App for BinpareApp {
         // poll dialog receiver if present (before consuming to_open)
         if let Some(rx) = &self.dialog_rx {
             match rx.try_recv() {
-                Ok(maybe_path) => {
+                Ok((target, maybe_path)) => {
                     if let Some(path) = maybe_path {
-                        to_open.push((0, path));
+                        to_open.push((target, path));
                     }
                     self.dialog_rx = None;
                 }
@@ -171,6 +198,29 @@ impl eframe::App for BinpareApp {
             }
         }
 
+        // If both files are present and ready, compute diff once and cache it to avoid
+        // recomputing every frame (major perf win in split view).
+        if self.file_a.is_some() && self.file_b.is_some() {
+            let a_ready = self.file_a.as_ref().unwrap().ready.load(Ordering::Acquire);
+            let b_ready = self.file_b.as_ref().unwrap().ready.load(Ordering::Acquire);
+            if a_ready && b_ready && self.diff.is_none() {
+                // acquire locks, compute diff, then drop locks
+                let a_data = self.file_a.as_ref().unwrap().data.lock().unwrap();
+                let b_data = self.file_b.as_ref().unwrap().data.lock().unwrap();
+                let max = std::cmp::max(a_data.len(), b_data.len());
+                let mut diffv = vec![false; max];
+                for i in 0..max {
+                    if a_data.get(i).copied() != b_data.get(i).copied() {
+                        diffv[i] = true;
+                    }
+                }
+                self.diff = Some(diffv);
+            }
+        } else {
+            // no pair to diff
+            self.diff = None;
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 if self.file_a.is_none() {
@@ -181,57 +231,35 @@ impl eframe::App for BinpareApp {
             ui.separator();
 
             if self.split_mode {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
+                ui.columns(2, |cols| {
+                    cols[0].vertical(|ui| {
                         if let Some(loaded) = &self.file_a {
                             let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
                             if !ready {
                                 ui.centered_and_justified(|ui| { ui.label("Loading file A..."); });
                             } else {
-                                // compute diff vs file_b
-                                let diff = if let Some(b) = &self.file_b {
-                                    let bd = b.data.lock().unwrap();
-                                    let max = std::cmp::max(data.len(), bd.len());
-                                    let mut diffvec = vec![false; max];
-                                    for i in 0..max {
-                                        if data.get(i).copied() != bd.get(i).copied() {
-                                            diffvec[i] = true;
-                                        }
-                                    }
-                                    Some(diffvec)
-                                } else {
-                                    None
-                                };
-                                hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                                // use cached diff if available
+                                ui.push_id("pane_a", |ui| {
+                                    hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref());
+                                });
                             }
                         } else {
                             ui.label("(no file)");
                         }
                     });
-                    ui.separator();
-                    ui.vertical(|ui| {
+
+                    cols[1].vertical(|ui| {
                         if let Some(loaded) = &self.file_b {
                             let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
                             if !ready {
                                 ui.centered_and_justified(|ui| { ui.label("Loading file B..."); });
                             } else {
-                                // compute diff vs file_a
-                                let diff = if let Some(a) = &self.file_a {
-                                    let ad = a.data.lock().unwrap();
-                                    let max = std::cmp::max(data.len(), ad.len());
-                                    let mut diffvec = vec![false; max];
-                                    for i in 0..max {
-                                        if data.get(i).copied() != ad.get(i).copied() {
-                                            diffvec[i] = true;
-                                        }
-                                    }
-                                    Some(diffvec)
-                                } else {
-                                    None
-                                };
-                                hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                                // use cached diff if available
+                                ui.push_id("pane_b", |ui| {
+                                    hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref());
+                                });
                             }
                         } else {
                             ui.label("(no file)");
@@ -248,11 +276,13 @@ impl eframe::App for BinpareApp {
             if i == 0 {
                 self.file_a = Some(BinpareApp::spawn_loaded_file(path));
                 self.loading = true;
+                self.diff = None;
             } else {
                 // second dropped/opened file -> assign to file_b and enable split
                 self.file_b = Some(BinpareApp::spawn_loaded_file(path));
                 self.loading = true;
                 self.split_mode = true;
+                self.diff = None;
             }
         }
     }
@@ -262,7 +292,9 @@ fn render_pane_single(ui: &mut egui::Ui, file: &Option<LoadedFile>, bytes_per_ro
     ui.group(|ui| {
         if let Some(loaded) = file {
             let data = loaded.data.lock().unwrap();
-            hexdump_ui(ui, &data, bytes_per_row, None);
+            ui.push_id("single_pane", |ui| {
+                hexdump_ui(ui, &data, bytes_per_row, None);
+            });
         } else {
             ui.label("(no file)");
         }
@@ -302,46 +334,58 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
     let rows = (data.len() + bytes_per_row - 1) / bytes_per_row;
     let row_height = 18.0;
     egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, row_range| {
-        for row in row_range {
-            let offset = row * bytes_per_row;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{:08x}:", offset)).monospace());
-                // hex bytes
-                for i in 0..bytes_per_row {
-                    let idx = offset + i;
-                    if idx < data.len() {
-                        let b = data[idx];
-                        let s = format!("{:02x}", b);
-                        let mut rt = RichText::new(s).monospace();
-                        if let Some(diffv) = diff_opt {
-                            if idx < diffv.len() && diffv[idx] {
-                                rt = rt.color(Color32::from_rgb(220, 100, 100));
+            for row in row_range {
+                let offset = row * bytes_per_row;
+                ui.push_id(row, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{:08x}:", offset)).monospace());
+
+                        // Build hex and ascii strings for this row
+                        let mut hex_line = String::with_capacity(bytes_per_row * 3);
+                        let mut ascii = String::with_capacity(bytes_per_row);
+                        let mut row_has_diff = false;
+                        const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+                        for i in 0..bytes_per_row {
+                            let idx = offset + i;
+                            if idx < data.len() {
+                                let b = data[idx];
+                                // append two hex chars
+                                hex_line.push(HEX_CHARS[(b >> 4) as usize] as char);
+                                hex_line.push(HEX_CHARS[(b & 0xF) as usize] as char);
+                                hex_line.push(' ');
+
+                                // ascii
+                                if b.is_ascii_graphic() || b == b' ' {
+                                    ascii.push(b as char);
+                                } else {
+                                    ascii.push('.');
+                                }
+
+                                if let Some(diffv) = diff_opt {
+                                    if idx < diffv.len() && diffv[idx] {
+                                        row_has_diff = true;
+                                    }
+                                }
+                            } else {
+                                hex_line.push_str("   ");
+                                ascii.push(' ');
                             }
                         }
-                        ui.add(egui::Label::new(rt));
-                    } else {
-                        ui.label("  ");
-                    }
-                }
-                ui.separator();
-                // ascii
-                let mut ascii = String::with_capacity(bytes_per_row);
-                for i in 0..bytes_per_row {
-                    let idx = offset + i;
-                    if idx < data.len() {
-                        let c = data[idx];
-                        if c.is_ascii_graphic() || c == b' ' {
-                            ascii.push(c as char);
-                        } else {
-                            ascii.push('.');
+
+                        // Color entire row if any byte differs (faster than per-byte coloring)
+                        let mut rt_hex = RichText::new(hex_line).monospace();
+                        let mut rt_ascii = RichText::new(ascii).monospace();
+                        if row_has_diff {
+                            let c = Color32::from_rgb(220, 100, 100);
+                            rt_hex = rt_hex.color(c);
+                            rt_ascii = rt_ascii.color(c);
                         }
-                    } else {
-                        ascii.push(' ');
-                    }
-                }
-                let art = RichText::new(ascii).monospace();
-                ui.add(egui::Label::new(art));
-            });
+
+                        ui.add(egui::Label::new(rt_hex));
+                        ui.separator();
+                        ui.add(egui::Label::new(rt_ascii));
+                    });
+                });
         }
     });
 }
