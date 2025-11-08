@@ -1,6 +1,8 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use std::io::Read;
 
@@ -9,18 +11,20 @@ const MAX_READ_BYTES: u64 = 100 * 1024 * 1024; // 100 MB guard for initial imple
 
 fn main() {
     let native_options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let _ = eframe::run_native(
         "binpare",
         native_options,
         Box::new(|cc| Ok(Box::new(BinpareApp::new(cc)))),
     );
 }
 
+#[allow(dead_code)]
 struct LoadedFile {
     path: PathBuf,
     data: Arc<Mutex<Vec<u8>>>,
     size: u64,
     truncated: bool,
+    ready: Arc<AtomicBool>,
 }
 
 struct BinpareApp {
@@ -29,6 +33,7 @@ struct BinpareApp {
     split_mode: bool,
     bytes_per_row: usize,
     loading: bool,
+    dialog_rx: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl BinpareApp {
@@ -67,17 +72,21 @@ impl BinpareApp {
             split_mode: false,
             bytes_per_row: DEFAULT_BYTES_PER_ROW,
             loading: false,
+            dialog_rx: None,
         }
     }
 
+    #[allow(dead_code)]
     fn open_file_in_background(&mut self, path: PathBuf, target: &mut Option<LoadedFile>) {
         // kept for compatibility but forward to spawn_loaded_file
         *target = Some(BinpareApp::spawn_loaded_file(path));
     }
 
     fn spawn_loaded_file(path: PathBuf) -> LoadedFile {
-        let data_arc = Arc::new(Mutex::new(Vec::new()));
-        let data_clone = data_arc.clone();
+    let data_arc = Arc::new(Mutex::new(Vec::new()));
+    let data_clone = data_arc.clone();
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_clone = ready.clone();
         let path_clone = path.clone();
 
         thread::spawn(move || {
@@ -89,6 +98,7 @@ impl BinpareApp {
                     let _ = file.take(to_read).read_to_end(&mut tmp);
                     let mut locked = data_clone.lock().unwrap();
                     *locked = tmp;
+                    ready_clone.store(true, Ordering::Release);
                 }
             }
         });
@@ -98,6 +108,7 @@ impl BinpareApp {
             data: data_arc,
             size: 0,
             truncated: false,
+            ready,
         }
     }
 }
@@ -111,8 +122,14 @@ impl eframe::App for BinpareApp {
             ui.horizontal(|ui| {
                 ui.heading("binpare");
                 if ui.button("Open").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        to_open.push((0, path));
+                    // spawn native file dialog in background thread to avoid blocking UI thread
+                    if self.dialog_rx.is_none() {
+                        let (tx, rx) = channel();
+                        self.dialog_rx = Some(rx);
+                        thread::spawn(move || {
+                            let res = rfd::FileDialog::new().pick_file();
+                            let _ = tx.send(res);
+                        });
                     }
                 }
                 if ui.button(if self.split_mode { "Single view" } else { "Split view" }).clicked() {
@@ -136,6 +153,24 @@ impl eframe::App for BinpareApp {
             }
         }
 
+        // poll dialog receiver if present (before consuming to_open)
+        if let Some(rx) = &self.dialog_rx {
+            match rx.try_recv() {
+                Ok(maybe_path) => {
+                    if let Some(path) = maybe_path {
+                        to_open.push((0, path));
+                    }
+                    self.dialog_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // still waiting for dialog result
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.dialog_rx = None;
+                }
+            }
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 if self.file_a.is_none() {
@@ -149,22 +184,27 @@ impl eframe::App for BinpareApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         if let Some(loaded) = &self.file_a {
+                            let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
-                            // compute diff vs file_b
-                            let diff = if let Some(b) = &self.file_b {
-                                let bd = b.data.lock().unwrap();
-                                let max = std::cmp::max(data.len(), bd.len());
-                                let mut diffvec = vec![false; max];
-                                for i in 0..max {
-                                    if data.get(i).copied() != bd.get(i).copied() {
-                                        diffvec[i] = true;
-                                    }
-                                }
-                                Some(diffvec)
+                            if !ready {
+                                ui.centered_and_justified(|ui| { ui.label("Loading file A..."); });
                             } else {
-                                None
-                            };
-                            hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                                // compute diff vs file_b
+                                let diff = if let Some(b) = &self.file_b {
+                                    let bd = b.data.lock().unwrap();
+                                    let max = std::cmp::max(data.len(), bd.len());
+                                    let mut diffvec = vec![false; max];
+                                    for i in 0..max {
+                                        if data.get(i).copied() != bd.get(i).copied() {
+                                            diffvec[i] = true;
+                                        }
+                                    }
+                                    Some(diffvec)
+                                } else {
+                                    None
+                                };
+                                hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                            }
                         } else {
                             ui.label("(no file)");
                         }
@@ -172,22 +212,27 @@ impl eframe::App for BinpareApp {
                     ui.separator();
                     ui.vertical(|ui| {
                         if let Some(loaded) = &self.file_b {
+                            let ready = loaded.ready.load(Ordering::Acquire);
                             let data = loaded.data.lock().unwrap();
-                            // compute diff vs file_a
-                            let diff = if let Some(a) = &self.file_a {
-                                let ad = a.data.lock().unwrap();
-                                let max = std::cmp::max(data.len(), ad.len());
-                                let mut diffvec = vec![false; max];
-                                for i in 0..max {
-                                    if data.get(i).copied() != ad.get(i).copied() {
-                                        diffvec[i] = true;
-                                    }
-                                }
-                                Some(diffvec)
+                            if !ready {
+                                ui.centered_and_justified(|ui| { ui.label("Loading file B..."); });
                             } else {
-                                None
-                            };
-                            hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                                // compute diff vs file_a
+                                let diff = if let Some(a) = &self.file_a {
+                                    let ad = a.data.lock().unwrap();
+                                    let max = std::cmp::max(data.len(), ad.len());
+                                    let mut diffvec = vec![false; max];
+                                    for i in 0..max {
+                                        if data.get(i).copied() != ad.get(i).copied() {
+                                            diffvec[i] = true;
+                                        }
+                                    }
+                                    Some(diffvec)
+                                } else {
+                                    None
+                                };
+                                hexdump_ui(ui, &data, self.bytes_per_row, diff.as_ref());
+                            }
                         } else {
                             ui.label("(no file)");
                         }
@@ -224,6 +269,7 @@ fn render_pane_single(ui: &mut egui::Ui, file: &Option<LoadedFile>, bytes_per_ro
     });
 }
 
+#[allow(dead_code)]
 fn render_pane(mut col: egui::Ui, file: &Option<LoadedFile>, other: &Option<LoadedFile>, bytes_per_row: usize) {
     col.group(|ui| {
         if let Some(loaded) = file {
@@ -254,8 +300,9 @@ fn render_pane(mut col: egui::Ui, file: &Option<LoadedFile>, other: &Option<Load
 fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Option<&Vec<bool>>) {
     use egui::{Color32, RichText};
     let rows = (data.len() + bytes_per_row - 1) / bytes_per_row;
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for row in 0..rows {
+    let row_height = 18.0;
+    egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, row_range| {
+        for row in row_range {
             let offset = row * bytes_per_row;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{:08x}:", offset)).monospace());
