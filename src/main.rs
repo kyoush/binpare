@@ -159,10 +159,6 @@ impl eframe::App for BinpareApp {
                         self.split_mode = !self.split_mode;
                     }
                 });
-
-                ui.push_id("bytes_per_row", |ui| {
-                    ui.add(egui::Slider::new(&mut self.bytes_per_row, 8..=32).text("bytes/row"));
-                });
             });
         });
 
@@ -239,8 +235,22 @@ impl eframe::App for BinpareApp {
                             if !ready {
                                 ui.centered_and_justified(|ui| { ui.label("Loading file A..."); });
                             } else {
-                                // use cached diff if available
+                                // header (fixed) + scrollable hexdump
                                 ui.push_id("pane_a", |ui| {
+                                    ui.horizontal(|ui| {
+                                        // offset column placeholder to align with row offsets (e.g. "00000000:")
+                                        ui.label(egui::RichText::new(format!("{:08x}:", 0)).monospace());
+                                        // slight additional right offset
+                                        ui.add_space(6.0);
+                                        // hex header 00 01 ... 0F (bold)
+                                        let mut hex_header = String::with_capacity(self.bytes_per_row * 3);
+                                        for i in 0..self.bytes_per_row {
+                                            hex_header.push_str(&format!("{:02x} ", i));
+                                        }
+                                        ui.add(egui::Label::new(egui::RichText::new(hex_header).monospace().strong()));
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("ASCII").monospace().strong());
+                                    });
                                     hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref());
                                 });
                             }
@@ -256,8 +266,19 @@ impl eframe::App for BinpareApp {
                             if !ready {
                                 ui.centered_and_justified(|ui| { ui.label("Loading file B..."); });
                             } else {
-                                // use cached diff if available
+                                // header (fixed) + scrollable hexdump
                                 ui.push_id("pane_b", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!("{:08x}:", 0)).monospace());
+                                        ui.add_space(6.0);
+                                        let mut hex_header = String::with_capacity(self.bytes_per_row * 3);
+                                        for i in 0..self.bytes_per_row {
+                                            hex_header.push_str(&format!("{:02x} ", i));
+                                        }
+                                        ui.add(egui::Label::new(egui::RichText::new(hex_header).monospace().strong()));
+                                        ui.separator();
+                                        ui.label(egui::RichText::new("ASCII").monospace().strong());
+                                    });
                                     hexdump_ui(ui, &data, self.bytes_per_row, self.diff.as_ref());
                                 });
                             }
@@ -293,6 +314,17 @@ fn render_pane_single(ui: &mut egui::Ui, file: &Option<LoadedFile>, bytes_per_ro
         if let Some(loaded) = file {
             let data = loaded.data.lock().unwrap();
             ui.push_id("single_pane", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{:08x}:", 0)).monospace());
+                    ui.add_space(6.0);
+                    let mut hex_header = String::with_capacity(bytes_per_row * 3);
+                    for i in 0..bytes_per_row {
+                        hex_header.push_str(&format!("{:02x} ", i));
+                    }
+                    ui.add(egui::Label::new(egui::RichText::new(hex_header).monospace().strong()));
+                    ui.separator();
+                    ui.label(egui::RichText::new("ASCII").monospace().strong());
+                });
                 hexdump_ui(ui, &data, bytes_per_row, None);
             });
         } else {
@@ -339,6 +371,8 @@ fn hexdump_ui(ui: &mut egui::Ui, data: &[u8], bytes_per_row: usize, diff_opt: Op
                 ui.push_id(row, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("{:08x}:", offset)).monospace());
+                        // match header offset spacing
+                        ui.add_space(6.0);
 
                         // Build hex and ascii strings for this row
                         let mut hex_line = String::with_capacity(bytes_per_row * 3);
